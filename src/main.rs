@@ -79,12 +79,31 @@ fn run_server() {
 
         let mut listener_stream = listener_stream.unwrap();
 
-        let mut buffer = vec![0u8; 65535];
+        let mut buffer = vec![0u8; 0];
 
         println!("listener_stream read to end...");
-        let len = listener_stream.read(&mut buffer).unwrap();
 
-        println!("{}", String::from_utf8_lossy(&buffer[..len]));
+        //loop{//read data loop //don't need
+            let mut buffer_inner = vec![0u8; 65535];
+
+            if let Ok(len) = listener_stream.read(&mut buffer_inner){//may block
+                if len>0{
+                    println!("len: {} data: {}",len, String::from_utf8_lossy(&buffer_inner[..len]));
+
+                    buffer.append(&mut buffer_inner[..len].to_vec());
+                }else{
+                    println!("OK: listener_stream maybe close...");
+                    //break;
+                    continue;
+                }
+                
+            } else{
+                println!("Error: listener_stream maybe read to end...");
+                //break;
+                continue;
+            }
+        //}
+        
         
         println!("listener_stream write to noise...");
         let len = noise.write_message(&buffer[..len], &mut buf).unwrap();
@@ -165,6 +184,9 @@ fn run_client() {
             println!("local_stream pipe to noise");
             let len = noise.write_message(&buffer[..len], &mut buf).unwrap();
             send(&mut stream, &buf[..len]);
+        }else{
+            println!("local_stream can't  recv noise , close...");
+            break;
         }
     
         
