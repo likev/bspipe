@@ -12,13 +12,17 @@
 use lazy_static::lazy_static;
 
 use clap::App;
-use snow::{params::NoiseParams, Builder};
+use snow::{params::NoiseParams, Builder, TransportState};
 
 use std::{
     io::{self, Read, Write},
     net::{TcpListener, TcpStream},
     sync::mpsc,
     thread,
+    time::Duration,
+
+    sync::{Arc, Mutex},
+    mem::drop,
 };
 
 static SECRET: &[u8] = b"i don't care for fidget spinners";
@@ -63,7 +67,7 @@ fn run_server() {
     noise.read_message(&recv(&mut stream).unwrap(), &mut buf).unwrap();
 
     // Transition the state machine into transport mode now that the handshake is complete.
-    let mut noise = noise.into_transport_mode().unwrap();
+    let noise = noise.into_transport_mode().unwrap();
 
     /*
     while let Ok(msg) = recv(&mut stream) {
@@ -72,7 +76,7 @@ fn run_server() {
     }
     */
 
-    let stream_clone = stream.try_clone().expect("clone failed...");
+    let arc_noise = Arc::new(Mutex::new(noise));
 
     // Wait on our client's arrival...
     let listener_address = "127.0.0.1:8080";
@@ -81,72 +85,142 @@ fn run_server() {
 
     let (tx0, rx) = mpsc::channel();
 
-    for listener_stream in listener.incoming() {
+    let handles = Arc::new(Mutex::new(vec![]));
+
+    let handles1 = Arc::clone(&handles);
+
+        let mut stream_clone = stream.try_clone().expect("clone failed...");
+            
+        let arc_noise1 = Arc::clone(&arc_noise);
+
+        thread::spawn(move ||{
+
+            loop{             
+
+                let received:Vec<u8> = rx.recv().unwrap();
+                println!("Got: {}", received.len());
+
+                println!("listener_stream wait arc_noise1.lock()...");
+                let mut noise = arc_noise1.lock().unwrap();
+                println!("listener_stream get arc_noise1.lock()...");
+                
+                println!("listener_stream write to noise...");
+                let len = noise.write_message(&received, &mut buf).unwrap();
+                drop(noise);
+
+                println!("listener_stream send noise...");
+                send(&mut stream, &buf[..len]);
+                println!("listener_stream sended noise...");
+
+                thread::sleep(Duration::from_millis(1));//for system thread change
+            }
+        });
+
+        println!("recv noise ...");
+        
+        let arc_noise2 = Arc::clone(&arc_noise);
+        thread::spawn(move ||{
+
+            read_and_send_back("listener-stream", &mut stream_clone, arc_noise2, handles);
+
+        });
+
+        let mut counter = 0i32;
+
+        for listener_stream in listener.incoming() {
         //thread::spawn(|| {//new thread every income
             println!("new listener_stream");
 
-            let mut listener_stream = listener_stream.unwrap();
-            let mut listener_stream_clone = listener_stream.try_clone().expect("clone failed...");
+            let mut listener_stream = listener_stream.unwrap();//for read
+            let listener_stream_clone = listener_stream.try_clone().expect("clone failed...");//for later write
+
+            println!("listener_stream wait handles1.lock...");
+            let mut vec = handles1.lock().unwrap();
+            counter = counter + 1;
+
+            vec.push((counter, listener_stream_clone));
+
+            drop(vec);
+
 
             let tx = tx0.clone();//for future new thread 
 
-            thread::spawn(move || {// for read block
+            thread::spawn(move ||{
 
-                let mut buffer = vec![0u8; 0];
-
-                println!("listener_stream read to end...");
-
-                loop{//read data loop
-                    let mut buffer_inner = vec![0u8; 65535];
-
-                    if let Ok(len) = listener_stream.read(&mut buffer_inner){//may block
-                        if len>0{
-                            println!("len: {} data: {}",len, String::from_utf8_lossy(&buffer_inner[..len]));
-
-                            //buffer.append(&mut buffer_inner[..len].to_vec());
-                            buffer_inner.resize(len, 0);
-
-                            tx.send(buffer_inner).unwrap();
-                        }else{
-                            println!("OK: listener_stream maybe close...");
-                            break;
-                            //continue;
-                        }
-                        
-                    } else{
-                        println!("Error: listener_stream maybe read to end...");
-                        break;
-                        //continue;
-                    }
-                }
-                
-                
+                read_and_send("listener-stream", &mut listener_stream, tx);
             });
-
-
-            let received = rx.recv().unwrap();
-            println!("Got: {}", received.len());
-            
-            println!("listener_stream write to noise...");
-            let len = noise.write_message(&received, &mut buf).unwrap();
-            send(&mut stream, &buf[..len]);
-
-            println!("recv noise ...");
-            if let Ok(msg) = recv(&mut stream){
-                let len = noise.read_message(&msg, &mut buf).unwrap();
-                println!("{}", String::from_utf8_lossy(&buf[..len]));
-                
-                println!("noise to listener_stream ...");
-                listener_stream_clone.write_all(&buf[..len]);
-            }
-        
-        //});//end of thread
-
-    }
-    
-    
+        }
 
     println!("connection closed.");
+}
+
+fn read_and_send_back(name: &str, stream: &mut TcpStream, noise: Arc<Mutex<TransportState>>, handles:Arc<Mutex<Vec<(i32, TcpStream)>>>){// for read block
+
+    let mut buf = vec![0u8; 65535];
+
+    loop{
+        println!("listener_stream wait recv and send back...");
+        if let Ok(msg) = recv(stream){
+
+            println!("listener_stream wait handles.lock...");
+            let vec = handles.lock().unwrap();
+
+            let item = &vec[0];
+           
+
+            let mut stream_back = &item.1;
+
+
+            println!("listener_stream wait arc_noise2.lock()...");
+            let mut noise = noise.lock().unwrap();
+            println!("listener_stream get arc_noise2.lock()...");
+
+            let len = noise.read_message(&msg, &mut buf).unwrap();
+            
+            drop(noise);
+            
+            println!("{}", String::from_utf8_lossy(&buf[..len]));
+            
+            println!("noise to listener_stream ...");
+            stream_back.write_all(&buf[..len]).unwrap();
+
+            drop(vec);
+        }
+        thread::sleep(Duration::from_millis(1));//for system thread change
+    }
+}
+
+fn read_and_send(name: &str, stream: &mut TcpStream, tx: mpsc::Sender<Vec<u8>>){// for read block
+
+        //let mut buffer = vec![0u8; 0];
+
+        println!("{} read to end...", name);
+
+        loop{//read data loop
+            let mut buffer_inner = vec![0u8; 65535];
+
+            if let Ok(len) = stream.read(&mut buffer_inner){//may block
+                if len>0{
+                    println!("len: {} data: {}",len, String::from_utf8_lossy(&buffer_inner[..len]));
+
+                    //buffer.append(&mut buffer_inner[..len].to_vec());
+                    buffer_inner.resize(len, 0);
+
+                    tx.send(buffer_inner).unwrap();
+
+                    thread::sleep(Duration::from_millis(1));//for system thread change
+                }else{
+                    println!("OK: {} maybe close...", name);
+                    break;
+                    //continue;
+                }
+                
+            } else{
+                println!("Error: {} maybe read to end...", name);
+                break;
+                //continue;
+            }
+        }
 }
 
 #[cfg(any(feature = "default-resolver", feature = "ring-accelerated"))]
@@ -199,7 +273,7 @@ fn run_client() {
             let mut local_stream = TcpStream::connect("127.0.0.1:7878").unwrap();
 
             println!("local_stream write ...");
-            let len = local_stream.write_all(&buf[..len]).unwrap();
+            local_stream.write_all(&buf[..len]).unwrap();
             
             let mut buffer = vec![0u8; 65535];
             println!("local_stream read ...");
