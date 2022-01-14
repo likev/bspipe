@@ -13,9 +13,12 @@ use lazy_static::lazy_static;
 
 use clap::App;
 use snow::{params::NoiseParams, Builder};
+
 use std::{
     io::{self, Read, Write},
     net::{TcpListener, TcpStream},
+    sync::mpsc,
+    thread,
 };
 
 static SECRET: &[u8] = b"i don't care for fidget spinners";
@@ -69,57 +72,79 @@ fn run_server() {
     }
     */
 
+    let stream_clone = stream.try_clone().expect("clone failed...");
+
     // Wait on our client's arrival...
     let listener_address = "127.0.0.1:8080";
     let listener = TcpListener::bind(listener_address).unwrap();
     println!("listen on address: {}", listener_address);
 
+    let (tx0, rx) = mpsc::channel();
+
     for listener_stream in listener.incoming() {
-        println!("new listener_stream");
+        //thread::spawn(|| {//new thread every income
+            println!("new listener_stream");
 
-        let mut listener_stream = listener_stream.unwrap();
+            let mut listener_stream = listener_stream.unwrap();
+            let mut listener_stream_clone = listener_stream.try_clone().expect("clone failed...");
 
-        let mut buffer = vec![0u8; 0];
+            let tx = tx0.clone();//for future new thread 
 
-        println!("listener_stream read to end...");
+            thread::spawn(move || {// for read block
 
-        //loop{//read data loop //don't need
-            let mut buffer_inner = vec![0u8; 65535];
+                let mut buffer = vec![0u8; 0];
 
-            if let Ok(len) = listener_stream.read(&mut buffer_inner){//may block
-                if len>0{
-                    println!("len: {} data: {}",len, String::from_utf8_lossy(&buffer_inner[..len]));
+                println!("listener_stream read to end...");
 
-                    buffer.append(&mut buffer_inner[..len].to_vec());
-                }else{
-                    println!("OK: listener_stream maybe close...");
-                    //break;
-                    continue;
+                loop{//read data loop
+                    let mut buffer_inner = vec![0u8; 65535];
+
+                    if let Ok(len) = listener_stream.read(&mut buffer_inner){//may block
+                        if len>0{
+                            println!("len: {} data: {}",len, String::from_utf8_lossy(&buffer_inner[..len]));
+
+                            //buffer.append(&mut buffer_inner[..len].to_vec());
+                            buffer_inner.resize(len, 0);
+
+                            tx.send(buffer_inner).unwrap();
+                        }else{
+                            println!("OK: listener_stream maybe close...");
+                            break;
+                            //continue;
+                        }
+                        
+                    } else{
+                        println!("Error: listener_stream maybe read to end...");
+                        break;
+                        //continue;
+                    }
                 }
                 
-            } else{
-                println!("Error: listener_stream maybe read to end...");
-                //break;
-                continue;
-            }
-        //}
-        
-        
-        println!("listener_stream write to noise...");
-        let len = noise.write_message(&buffer[..len], &mut buf).unwrap();
-        send(&mut stream, &buf[..len]);
+                
+            });
 
-        println!("recv noise ...");
-        if let Ok(msg) = recv(&mut stream){
-            let len = noise.read_message(&msg, &mut buf).unwrap();
-            println!("{}", String::from_utf8_lossy(&buf[..len]));
+
+            let received = rx.recv().unwrap();
+            println!("Got: {}", received.len());
             
-            println!("noise to listener_stream ...");
-            listener_stream.write_all(&buf[..len]);
-        }
-        
-    }
+            println!("listener_stream write to noise...");
+            let len = noise.write_message(&received, &mut buf).unwrap();
+            send(&mut stream, &buf[..len]);
 
+            println!("recv noise ...");
+            if let Ok(msg) = recv(&mut stream){
+                let len = noise.read_message(&msg, &mut buf).unwrap();
+                println!("{}", String::from_utf8_lossy(&buf[..len]));
+                
+                println!("noise to listener_stream ...");
+                listener_stream_clone.write_all(&buf[..len]);
+            }
+        
+        //});//end of thread
+
+    }
+    
+    
 
     println!("connection closed.");
 }
