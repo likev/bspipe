@@ -234,7 +234,17 @@ fn run_client() {
         builder.local_private_key(&static_key).psk(3, SECRET).build_initiator().unwrap();
 
     // Connect to our server, which is hopefully listening.
-    let mut stream = TcpStream::connect("127.0.0.1:9999").unwrap();
+    let mut stream = loop{
+        if let Ok(stream) = TcpStream::connect("127.0.0.1:9999"){
+            break stream;
+        }else{
+            println!("connected fail wait 5 secs...");
+            thread::sleep(Duration::from_secs(5));
+            println!("connected retry...");
+            continue;
+        }
+    };
+
     println!("connected...");
 
     // -> e
