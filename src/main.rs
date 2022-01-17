@@ -23,6 +23,11 @@ use std::{
 
     sync::{Arc, Mutex},
     mem::drop,
+
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+
+    collections::HashMap,
 };
 
 static SECRET: &[u8] = b"i don't care for fidget spinners";
@@ -35,15 +40,14 @@ fn main() {
     let matches = App::new("simple").args_from_usage("-s --server 'Server mode'").get_matches();
 
     if matches.is_present("server") {
-        run_server();
+        run_proxy_service_end();
     } else {
-        run_client();
+        run_original_service_end();
     }
     println!("all done.");
 }
 
-#[cfg(any(feature = "default-resolver", feature = "ring-accelerated"))]
-fn run_server() {
+fn create_listen_stream()->(TcpStream, TransportState) {
     let mut buf = vec![0u8; 65535];
 
     // Initialize our responder using a builder.
@@ -75,6 +79,13 @@ fn run_server() {
         println!("client said: {}", String::from_utf8_lossy(&buf[..len]));
     }
     */
+    return (stream, noise);
+}
+
+#[cfg(any(feature = "default-resolver", feature = "ring-accelerated"))]
+fn run_proxy_service_end() {
+    
+    let (mut stream, noise) = create_connect_stream();
 
     let arc_noise = Arc::new(Mutex::new(noise));
 
@@ -89,102 +100,116 @@ fn run_server() {
 
     let handles1 = Arc::clone(&handles);
 
-        let mut stream_clone = stream.try_clone().expect("clone failed...");
+    let mut stream_clone = stream.try_clone().expect("clone failed...");
             
-        let arc_noise1 = Arc::clone(&arc_noise);
+    let arc_noise1 = Arc::clone(&arc_noise);
 
-        thread::spawn(move ||{
+    thread::spawn(move ||{
+        let mut buf = vec![0u8; 65535];
 
-            loop{             
+        loop{             
 
-                let received:Vec<u8> = rx.recv().unwrap();
-                println!("Got: {}", received.len());
+            let received:Vec<u8> = rx.recv().unwrap();
+            println!("Got: {}", received.len());
 
-                println!("listener_stream wait arc_noise1.lock()...");
-                let mut noise = arc_noise1.lock().unwrap();
-                println!("listener_stream get arc_noise1.lock()...");
-                
-                println!("listener_stream write to noise...");
-                let len = noise.write_message(&received, &mut buf).unwrap();
-                drop(noise);
+            println!("listener_stream wait arc_noise1.lock()...");
+            let mut noise = arc_noise1.lock().unwrap();
+            println!("listener_stream get arc_noise1.lock()...");
+            
+            println!("listener_stream write to noise...");
+            let len = noise.write_message(&received, &mut buf).unwrap();
+            drop(noise);
 
-                println!("listener_stream send noise...");
-                send(&mut stream, &buf[..len]);
-                println!("listener_stream sended noise...");
+            println!("listener_stream send noise...");
+            send(&mut stream, &buf[..len]);
+            println!("listener_stream sended noise...");
 
-                thread::sleep(Duration::from_millis(1));//for system thread change
-            }
-        });
-
-        println!("recv noise ...");
-        
-        let arc_noise2 = Arc::clone(&arc_noise);
-        thread::spawn(move ||{
-
-            read_and_send_back("listener-stream", &mut stream_clone, arc_noise2, handles);
-
-        });
-
-        let mut counter = 0i32;
-
-        for listener_stream in listener.incoming() {
-        //thread::spawn(|| {//new thread every income
-            println!("new listener_stream");
-
-            let mut listener_stream = listener_stream.unwrap();//for read
-            let listener_stream_clone = listener_stream.try_clone().expect("clone failed...");//for later write
-
-            println!("listener_stream wait handles1.lock...");
-            let mut vec = handles1.lock().unwrap();
-            counter = counter + 1;
-
-            vec.push((counter, listener_stream_clone));
-
-            drop(vec);
-
-
-            let tx = tx0.clone();//for future new thread 
-
-            thread::spawn(move ||{
-
-                read_and_send("listener-stream", &mut listener_stream, tx);
-            });
+            thread::sleep(Duration::from_millis(1));//for system thread change
         }
+    });
+
+    println!("recv noise ...");
+    
+    let arc_noise2 = Arc::clone(&arc_noise);
+    thread::spawn(move ||{
+
+        read_and_send_back("listener-stream", &mut stream_clone, arc_noise2, handles);
+
+    });
+
+    let mut counter = 0i32;
+
+    for listener_stream in listener.incoming() {
+    //thread::spawn(|| {//new thread every income
+        println!("new listener_stream");
+
+        let mut listener_stream = listener_stream.unwrap();//for read
+        let listener_stream_clone = listener_stream.try_clone().expect("clone failed...");//for later write
+
+        println!("listener_stream wait handles1.lock...");
+        let mut vec = handles1.lock().unwrap();
+        counter = counter + 1;
+
+        let peer_addr = listener_stream_clone.peer_addr().unwrap();
+
+        let mut hasher = DefaultHasher::new();
+        peer_addr.hash(&mut hasher);
+
+        vec.push((hasher.finish(), listener_stream_clone));
+
+        drop(vec);
+
+
+        let tx = tx0.clone();//for future new thread 
+
+        thread::spawn(move ||{
+
+            read_and_send("listener-stream", &mut listener_stream, tx);
+        });
+    }
 
     println!("connection closed.");
 }
 
-fn read_and_send_back(name: &str, stream: &mut TcpStream, noise: Arc<Mutex<TransportState>>, handles:Arc<Mutex<Vec<(i32, TcpStream)>>>){// for read block
+fn read_and_send_back(name: &str, stream: &mut TcpStream, noise: Arc<Mutex<TransportState>>, handles:Arc<Mutex<Vec<(u64, TcpStream)>>>){// for read block
 
     let mut buf = vec![0u8; 65535];
 
     loop{
-        println!("listener_stream wait recv and send back...");
+        println!("{} wait recv and send back...", name);
         if let Ok(msg) = recv(stream){
 
-            println!("listener_stream wait handles.lock...");
-            let vec = handles.lock().unwrap();
-
-            let item = &vec[0];
-           
-
-            let mut stream_back = &item.1;
-
-
-            println!("listener_stream wait arc_noise2.lock()...");
+            println!("{} wait arc_noise2.lock()...", name);
             let mut noise = noise.lock().unwrap();
-            println!("listener_stream get arc_noise2.lock()...");
+            println!("{} get arc_noise2.lock()...", name);
 
             let len = noise.read_message(&msg, &mut buf).unwrap();
             
             drop(noise);
-            
-            println!("{}", String::from_utf8_lossy(&buf[..len]));
-            
-            println!("noise to listener_stream ...");
-            stream_back.write_all(&buf[..len]).unwrap();
 
+            let peer_hash = u64::from_be_bytes(buf[..8].try_into().expect("slice with incorrect length"));
+            println!("peer_hash {} ", peer_hash);
+
+            println!("{} wait handles.lock...", name);
+            let vec = handles.lock().unwrap();
+
+            for item in vec.iter(){
+                if item.0 == peer_hash{
+                    let mut stream_back = &item.1;
+
+                    let buffer_data = &buf[8..len];
+                    
+                    println!("{}", String::from_utf8_lossy(&buffer_data));
+                    
+                    println!("noise to listener_stream ...");
+                    stream_back.write_all(&buffer_data).unwrap();
+                }
+            }
+           
             drop(vec);
+        }else{
+            //todo when stream close
+            break;
         }
         thread::sleep(Duration::from_millis(1));//for system thread change
     }
@@ -192,39 +217,69 @@ fn read_and_send_back(name: &str, stream: &mut TcpStream, noise: Arc<Mutex<Trans
 
 fn read_and_send(name: &str, stream: &mut TcpStream, tx: mpsc::Sender<Vec<u8>>){// for read block
 
-        //let mut buffer = vec![0u8; 0];
+    //let mut buffer = vec![0u8; 0];
 
-        println!("{} read to end...", name);
+    let peer_addr = stream.peer_addr().unwrap();
 
-        loop{//read data loop
-            let mut buffer_inner = vec![0u8; 65535];
+    let mut hasher = DefaultHasher::new();
+    peer_addr.hash(&mut hasher);
 
-            if let Ok(len) = stream.read(&mut buffer_inner){//may block
-                if len>0{
-                    println!("len: {} data: {}",len, String::from_utf8_lossy(&buffer_inner[..len]));
+    println!("listen_peer hasher: {}", hasher.finish());
 
-                    //buffer.append(&mut buffer_inner[..len].to_vec());
-                    buffer_inner.resize(len, 0);
+    println!("{} read to end...", name);
+    
+    loop{//read data loop
 
-                    tx.send(buffer_inner).unwrap();
+        let mut buffer_inner = vec![0u8; 0];//65535
 
-                    thread::sleep(Duration::from_millis(1));//for system thread change
-                }else{
-                    println!("OK: {} maybe close...", name);
-                    break;
-                    //continue;
-                }
-                
-            } else{
-                println!("Error: {} maybe read to end...", name);
+        buffer_inner.append(&mut hasher.finish().to_be_bytes().to_vec());//8
+        buffer_inner.resize(65535, 0);
+        
+        if let Ok(len) = stream.read(&mut buffer_inner[8..]){//may block
+            if len>0{
+                let totle_size = 8 + len;
+                println!("len: {} data: \n\n{}\n\n",len, String::from_utf8_lossy(&buffer_inner[8..totle_size]));
+
+                //buffer.append(&mut buffer_inner[..len].to_vec());
+                buffer_inner.resize(totle_size, 0);
+
+                tx.send(buffer_inner).unwrap();
+
+                thread::sleep(Duration::from_millis(1));//for system thread change
+            }else{
+                println!("OK: {} maybe close...", name);
                 break;
                 //continue;
             }
+            
+        } else{
+            println!("Error: {} maybe read to end...", name);
+            break;
+            //continue;
         }
+    }
 }
 
 #[cfg(any(feature = "default-resolver", feature = "ring-accelerated"))]
-fn run_client() {
+
+fn connect_loop(address: &str)->TcpStream{
+    let stream = loop {
+        println!("try connecte to {}", address);
+        if let Ok(stream) = TcpStream::connect(address){
+            break stream;
+        }else{
+            println!("connected fail wait 5 secs...");
+            thread::sleep(Duration::from_secs(5));
+            println!("connected retry...");
+            continue;
+        }
+    };
+    println!("local addr {:#?} \n peer addr {:#?}", stream.local_addr().unwrap(), stream.peer_addr().unwrap());
+
+    return stream;
+}
+
+fn create_connect_stream()->(TcpStream, TransportState) {
     let mut buf = vec![0u8; 65535];
 
     // Initialize our initiator using a builder.
@@ -234,16 +289,7 @@ fn run_client() {
         builder.local_private_key(&static_key).psk(3, SECRET).build_initiator().unwrap();
 
     // Connect to our server, which is hopefully listening.
-    let mut stream = loop{
-        if let Ok(stream) = TcpStream::connect("127.0.0.1:9999"){
-            break stream;
-        }else{
-            println!("connected fail wait 5 secs...");
-            thread::sleep(Duration::from_secs(5));
-            println!("connected retry...");
-            continue;
-        }
-    };
+    let mut stream = connect_loop("127.0.0.1:9999");
 
     println!("connected...");
 
@@ -258,7 +304,7 @@ fn run_client() {
     let len = noise.write_message(&[], &mut buf).unwrap();
     send(&mut stream, &buf[..len]);
 
-    let mut noise = noise.into_transport_mode().unwrap();
+    let noise = noise.into_transport_mode().unwrap();
     println!("session established...");
 
     /*
@@ -269,35 +315,243 @@ fn run_client() {
     }
     */
 
+    return (stream, noise);
+}
+
+fn run_original_service_end() {
+    let (mut stream, noise) = create_listen_stream();
+
+    let arc_noise = Arc::new(Mutex::new(noise));
+
+    let mut handles = vec![];
+    let new_peer_data = Arc::new(Mutex::new(vec![(0u64, vec![0u8;0]);0]));
+    let using_peers = Arc::new(Mutex::new(HashMap::new()));//vec![0u64;0]
+
+    
+
+    for thread_index in 0..10 {//ten threads to connect to service
+        let new_peer_data = Arc::clone(&new_peer_data);
+
+        let using_peers = Arc::clone(&using_peers);
+        let using_peers2 = Arc::clone(&using_peers);
+
+        let arc_noise = Arc::clone(&arc_noise);
+        let mut stream_clone = stream.try_clone().expect("clone failed...");
+
+        let handle = thread::spawn(move ||{
+            
+            let local_stream = connect_loop("127.0.0.1:7878");
+            let local_stream_read = local_stream.try_clone().expect("clone failed...");//for later read
+            
+            let arc_local_stream = Arc::new(Mutex::new(local_stream));
+            let arc_local_stream_clone = Arc::clone(&arc_local_stream);
+
+            let arc_local_stream_read = Arc::new(Mutex::new(local_stream_read));
+
+            let peer_hash = Arc::new(Mutex::new(0u64));
+            let peer_hash_clone = Arc::clone(&peer_hash);
+
+            thread::spawn(move ||{//read thread
+                loop{
+
+                    let peer_hash = peer_hash_clone.lock().unwrap();
+
+                    if *peer_hash == 0 {
+                        drop(peer_hash);
+
+                        thread::sleep(Duration::from_millis(1000));//for system thread change
+                        continue;
+                    }
+                    drop(peer_hash);
+
+
+                    let mut buffer = vec![0u8; 65535];
+
+                    //buffer_inner.append(&mut peer_hash.to_be_bytes().to_vec());//8
+                    //buffer_inner.resize(65535, 0);
+
+                    let mut local_stream_read = arc_local_stream_read.lock().unwrap();
+
+                    println!("local_stream read ...");
+                    let mut read_success = false;
+                    let mut len_read = 0;
+                    if let Ok(len) = local_stream_read.read(&mut buffer){
+                        if len > 0{
+                            len_read = len;
+                            read_success = true;
+                            buffer.resize(len_read, 0);
+
+                            println!("len: {} read from service: {}",len_read, String::from_utf8_lossy(&buffer));
+                        }else{
+                            println!("local_stream read over...");
+                            //connect close
+                        }
+                    }else{
+                        println!("local_stream read lost...");
+                        //connect lost
+                    }
+
+                    
+                    let mut peer_hash = peer_hash_clone.lock().unwrap();
+                    if !read_success{
+                        // re_connect
+                        // using_peers remove peer_hash
+                        // in_use = false
+                        
+                        let mut using_peers = using_peers2.lock().unwrap();
+                        using_peers.remove(&(*peer_hash));
+                        drop(using_peers);
+
+                        *peer_hash = 0;
+
+
+                        println!("local_stream close or lost, retry ...");
+
+                        let mut local_stream_clone = arc_local_stream_clone.lock().unwrap();
+
+                        *local_stream_read = connect_loop("127.0.0.1:7878");
+                        *local_stream_clone = local_stream_read.try_clone().expect("clone failed...");
+
+                        drop(local_stream_clone);
+
+                    }
+
+                    println!("local_stream read len {} ...", len_read);
+
+                    drop(local_stream_read);
+
+                    let total_len = 8 + len_read;
+
+                    
+                    let mut buffer_inner = peer_hash.to_be_bytes().to_vec();
+                    drop(peer_hash);
+
+                    buffer_inner.append(&mut buffer);
+                    println!("{}", String::from_utf8_lossy(&buffer_inner[8..total_len]));
+                    buffer_inner.resize(total_len, 0);
+    
+                    let mut arc_noise = arc_noise.lock().unwrap();
+                    println!("local_stream pipe to noise");
+
+                    let mut buf = vec![0u8; 65535];//65535
+                    let len = arc_noise.write_message(&buffer_inner, &mut buf).unwrap();
+
+                    send(&mut stream_clone, &buf[..len]);
+
+                    drop(arc_noise);
+                }
+                
+            });
+
+            loop{             
+                let mut new_peer_data = new_peer_data.lock().unwrap();
+
+                let mut index = 0;
+                loop{//each new piece data
+                    if index >= new_peer_data.len(){
+                        break;
+                    }
+
+                    let received = &new_peer_data[index];
+
+                    println!("local_stream check received {:?}", received);
+
+                    let received_hash = received.0;
+                    println!("local_stream {} check received new data hash {}", thread_index, received_hash);
+
+                    let mut using_peers = using_peers.lock().unwrap();
+
+                    println!("local_stream using_peers {:#?}", using_peers);
+
+                    let mut peer_hash = peer_hash.lock().unwrap();
+
+                    println!("local_stream peer_hash {:#?}", peer_hash);
+
+                    let mut self_work = false;
+
+                    if *peer_hash != 0 { // in use
+                        if *peer_hash == received_hash {
+                            self_work = true;
+
+                        }else{//let other do work
+                            //continue;
+                        }
+                    }else{
+                        if using_peers.get(&received_hash) != None {//let other do work
+                            //continue;
+                        }else{
+                            self_work = true;
+                            
+                            *peer_hash = received_hash;
+                            using_peers.insert(received_hash, true);
+                        }
+                    }
+
+                    if !self_work {
+                        index += 1;
+                        continue;
+                    }
+
+                    
+                    drop(peer_hash);
+                    
+
+                    drop(using_peers);
+
+                    let buffer_data = new_peer_data.swap_remove(index).1;
+
+                    println!("local_stream will write {}...", String::from_utf8_lossy(&buffer_data));
+
+                    let mut local_stream = arc_local_stream.lock().unwrap();
+                    println!("local_stream write ...");
+                    local_stream.write_all(&buffer_data).unwrap();
+                    local_stream.flush().unwrap();
+                    drop(local_stream);
+
+                    index += 1;
+
+                }
+                drop(new_peer_data);
+
+                thread::sleep(Duration::from_millis(1000));//for system thread change
+                
+            }
+
+        });
+        handles.push(handle);
+
+    }
+
+    let mut buf = vec![0u8; 65535];
     loop{
         println!("local_stream wait recv noise ...");
         
         if let Ok(msg) = recv(&mut stream){
             println!("local_stream wait recving noise ...");
 
-            let len = noise.read_message(&msg, &mut buf).unwrap();
+            let mut arc_noise = arc_noise.lock().unwrap();
+            let len = arc_noise.read_message(&msg, &mut buf).unwrap();
+            drop(arc_noise);
 
-            println!("len: {} noise: {}",len, String::from_utf8_lossy(&buf[..len]));
+            let peer_hash = u64::from_be_bytes(buf[..8].try_into().expect("slice with incorrect length"));
+            println!("peer_hash {} ", peer_hash);
 
-            // Connect to local service
-            let mut local_stream = TcpStream::connect("127.0.0.1:7878").unwrap();
+            let buffer_data = &buf[8..len];
 
-            println!("local_stream write ...");
-            local_stream.write_all(&buf[..len]).unwrap();
+            println!("len: {} noise: {}",len-8, String::from_utf8_lossy(buffer_data));
+
+            let mut new_peer_data = new_peer_data.lock().unwrap();
+            new_peer_data.push((peer_hash, buffer_data.to_vec()));
+
+            drop(new_peer_data);
+
             
-            let mut buffer = vec![0u8; 65535];
-            println!("local_stream read ...");
-            let len = local_stream.read(&mut buffer).unwrap();
-            println!("{}", String::from_utf8_lossy(&buffer[..len]));
-
-            println!("local_stream pipe to noise");
-            let len = noise.write_message(&buffer[..len], &mut buf).unwrap();
-            send(&mut stream, &buf[..len]);
         }else{
             println!("local_stream can't  recv noise , close...");
             break;
         }
     
+        thread::sleep(Duration::from_millis(1));//for system thread change
         
     }
     
