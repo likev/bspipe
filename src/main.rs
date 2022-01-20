@@ -58,8 +58,24 @@ fn main() {
             arg!(-t  --token <string> "Secure Token")
                 .default_value("i don't care for fidget spinners").required(false),
         ])
-        .after_help("Longer explanation to appear after the options when 
-                        displaying the help information from --help or -h")
+        .after_help("
+        Example Usage
+        
+        1. You have a remote server SSH, Access it on local
+        
+        on server: ./bspipe -s 127.0.0.1:22 -l serverIP:port -t your_token
+        on local : ./bspipe -a 127.0.0.1:33 -r serverIP:port -t your_token
+        
+        now on local: ssh -oPort=33 root@127.0.0.1
+        
+        
+        2. Your windows PC is at Home, Access it from outside
+        
+        on  Home : ./bspipe -s 127.0.0.1:3389 -r serverIP:port -t your_token
+        on serve : ./bspipe -a  serverIP:8933 -l serverIP:port -t your_token
+        
+        Now you can connect to serverIP:8933
+        ")
         .get_matches();
 
     //println!("matches:\n{:#?}", matches);
@@ -138,7 +154,7 @@ fn run_proxy_service_end(matches: clap::ArgMatches) {
 
     let (tx0, rx) = mpsc::channel();
 
-    let handles = Arc::new(Mutex::new(vec![]));
+    let handles = Arc::new(Mutex::new(HashMap::new()));//vec![]
 
     let handles1 = Arc::clone(&handles);
 
@@ -197,7 +213,7 @@ fn run_proxy_service_end(matches: clap::ArgMatches) {
         let mut hasher = DefaultHasher::new();
         peer_addr.hash(&mut hasher);
 
-        vec.push((hasher.finish(), listener_stream_clone));
+        vec.insert(hasher.finish(), listener_stream_clone);
 
         drop(vec);
 
@@ -213,7 +229,7 @@ fn run_proxy_service_end(matches: clap::ArgMatches) {
     println!("connection closed.");
 }
 
-fn read_and_send_back(name: &str, stream: &mut TcpStream, noise: Arc<Mutex<TransportState>>, handles:Arc<Mutex<Vec<(u64, TcpStream)>>>){// for read block
+fn read_and_send_back(name: &str, stream: &mut TcpStream, noise: Arc<Mutex<TransportState>>, handles:Arc<Mutex<HashMap<u64, TcpStream>>>){// for read block
 
     let mut buf = vec![0u8; 65535];
 
@@ -235,19 +251,25 @@ fn read_and_send_back(name: &str, stream: &mut TcpStream, noise: Arc<Mutex<Trans
             println!("peer_hash {} ", peer_hash);
 
             println!("{} wait handles.lock...", name);
-            let vec = handles.lock().unwrap();
+            let mut vec = handles.lock().unwrap();
 
-            for item in vec.iter(){
-                if item.0 == peer_hash{
-                    let mut stream_back = &item.1;
+            if let Some(mut stream_back) = vec.get(&peer_hash){
 
-                    let buffer_data = &buf[8..len];
-                    
-                    println!("{}", String::from_utf8_lossy(&buffer_data));
-                    
-                    println!("noise to listener_stream ...");
-                    stream_back.write_all(&buffer_data).unwrap();
+                let buffer_data = &buf[8..len];
+                
+                println!("{}", String::from_utf8_lossy(&buffer_data));
+                
+                println!("noise to listener_stream ...");
+                
+                if let Err(e) = stream_back.write_all(&buffer_data) {
+                    println!("listener_stream back error {} ...", e);
+                    vec.remove(&peer_hash);
                 }
+                
+            }else{
+                println!("listener_stream back is closed ...");
+                //todo
+                //need notify original sevice to close
             }
            
             drop(vec);
@@ -511,6 +533,8 @@ fn run_original_service_end(matches: clap::ArgMatches) {
 
                     let received_hash = received.0;
                     println!("local_stream {} check received new data hash {}", thread_index, received_hash);
+                    //todo
+                    //need to check if received_hash is closed in agent
 
                     let mut using_peers = using_peers.lock().unwrap();
 
