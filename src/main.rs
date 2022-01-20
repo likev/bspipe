@@ -11,7 +11,8 @@
 
 use lazy_static::lazy_static;
 
-use clap::App;
+use clap::{arg, app_from_crate};
+
 use snow::{params::NoiseParams, Builder, TransportState};
 
 use std::{
@@ -30,35 +31,76 @@ use std::{
     collections::HashMap,
 };
 
-static SECRET: &[u8] = b"i don't care for fidget spinners";
+//static SECRET: &[u8] = b"i don't care for fidget spinners";
 lazy_static! {
     static ref PARAMS: NoiseParams = "Noise_XXpsk3_25519_ChaChaPoly_BLAKE2s".parse().unwrap();
 }
 
 #[cfg(any(feature = "default-resolver", feature = "ring-accelerated"))]
 fn main() {
-    let matches = App::new("simple").args_from_usage("-s --server 'Server mode'").get_matches();
+    //let matches = App::new("simple").args_from_usage("-s --server 'Server mode'").get_matches();
+    let matches = 
+        app_from_crate!()
+        .about("bspipe A Rust implementation of Bidirectional Secure Pipe")
+        .args(&[
+            arg!(-l  --listen <host> "listen address to accept connection, must be identical to remote")
+                .default_missing_value("127.0.0.1:9999").default_value("127.0.0.1:9999").required(false),
+            
+            arg!(-a  --agent <host> "agent address others connect to")
+                .default_missing_value("127.0.0.1:8080").default_value("127.0.0.1:8080").required(false),
+            
+            arg!(-s  --service <host> "original service address")
+                .default_missing_value("127.0.0.1:7878").required(false),
+            
+            arg!(-r  --remote <host> "remote address to connect to, must be identical to listen")
+                .default_missing_value("127.0.0.1:9999").default_value("127.0.0.1:9999").required(false),
+            
+            arg!(-t  --token <string> "Secure Token")
+                .default_value("i don't care for fidget spinners").required(false),
+        ])
+        .after_help("Longer explanation to appear after the options when 
+                        displaying the help information from --help or -h")
+        .get_matches();
 
-    if matches.is_present("server") {
-        run_proxy_service_end();
+    //println!("matches:\n{:#?}", matches);
+
+    println!("matches service: {}", matches.is_present("listen"));
+
+    if !matches.is_present("service") {
+        println!("run_proxy_service_end");
+        run_proxy_service_end(matches);
     } else {
-        run_original_service_end();
+        println!("run_original_service_end");
+        run_original_service_end(matches);
     }
     println!("all done.");
 }
 
-fn create_listen_stream()->(TcpStream, TransportState) {
+fn string_resize(s: & str, size: usize, value: u8)->Vec<u8> {
+    let mut m = s.as_bytes().to_vec();
+    m.resize(size, value);
+
+    return m;
+}
+
+fn create_listen_stream(matches: &clap::ArgMatches)->(TcpStream, TransportState) {
     let mut buf = vec![0u8; 65535];
 
     // Initialize our responder using a builder.
     let builder: Builder<'_> = Builder::new(PARAMS.clone());
     let static_key = builder.generate_keypair().unwrap().private;
+
+    let token = matches.value_of("token").unwrap();
     let mut noise =
-        builder.local_private_key(&static_key).psk(3, SECRET).build_responder().unwrap();
+            builder
+                .local_private_key(&static_key)
+                .psk(3, &string_resize(token, 32, 0))
+                .build_responder().unwrap();
 
     // Wait on our client's arrival...
-    println!("listening on 127.0.0.1:9999");
-    let (mut stream, _) = TcpListener::bind("127.0.0.1:9999").unwrap().accept().unwrap();
+    let address = matches.value_of("listen").unwrap();
+    println!("listening on {}", address);
+    let (mut stream, _) = TcpListener::bind(address).unwrap().accept().unwrap();
 
     // <- e
     noise.read_message(&recv(&mut stream).unwrap(), &mut buf).unwrap();
@@ -73,26 +115,26 @@ fn create_listen_stream()->(TcpStream, TransportState) {
     // Transition the state machine into transport mode now that the handshake is complete.
     let noise = noise.into_transport_mode().unwrap();
 
-    /*
-    while let Ok(msg) = recv(&mut stream) {
-        let len = noise.read_message(&msg, &mut buf).unwrap();
-        println!("client said: {}", String::from_utf8_lossy(&buf[..len]));
-    }
-    */
     return (stream, noise);
 }
 
 #[cfg(any(feature = "default-resolver", feature = "ring-accelerated"))]
-fn run_proxy_service_end() {
-    
-    let (mut stream, noise) = create_connect_stream();
+fn run_proxy_service_end(matches: clap::ArgMatches) {
+
+    let (mut stream, noise) = 
+        if matches.occurrences_of("listen") > 0 {
+            create_listen_stream(&matches)
+        }else{
+            create_connect_stream(&matches)
+        };
 
     let arc_noise = Arc::new(Mutex::new(noise));
 
     // Wait on our client's arrival...
-    let listener_address = "127.0.0.1:8080";
+    let listener_address = matches.value_of("agent").unwrap();
+
     let listener = TcpListener::bind(listener_address).unwrap();
-    println!("listen on address: {}", listener_address);
+    println!("agent listen on address: {}", listener_address);
 
     let (tx0, rx) = mpsc::channel();
 
@@ -182,6 +224,8 @@ fn read_and_send_back(name: &str, stream: &mut TcpStream, noise: Arc<Mutex<Trans
             println!("{} wait arc_noise2.lock()...", name);
             let mut noise = noise.lock().unwrap();
             println!("{} get arc_noise2.lock()...", name);
+
+            println!("before noise read secret message: {}", String::from_utf8_lossy(&msg));
 
             let len = noise.read_message(&msg, &mut buf).unwrap();
             
@@ -279,17 +323,24 @@ fn connect_loop(address: &str)->TcpStream{
     return stream;
 }
 
-fn create_connect_stream()->(TcpStream, TransportState) {
+fn create_connect_stream(matches: &clap::ArgMatches)->(TcpStream, TransportState) {
     let mut buf = vec![0u8; 65535];
 
     // Initialize our initiator using a builder.
     let builder: Builder<'_> = Builder::new(PARAMS.clone());
     let static_key = builder.generate_keypair().unwrap().private;
+
+    let token = matches.value_of("token").unwrap();
+    
     let mut noise =
-        builder.local_private_key(&static_key).psk(3, SECRET).build_initiator().unwrap();
+                builder
+                    .local_private_key(&static_key)
+                    .psk(3, &string_resize(token, 32, 0))
+                    .build_initiator().unwrap();
 
     // Connect to our server, which is hopefully listening.
-    let mut stream = connect_loop("127.0.0.1:9999");
+    
+    let mut stream = connect_loop(matches.value_of("remote").unwrap());
 
     println!("connected...");
 
@@ -307,19 +358,16 @@ fn create_connect_stream()->(TcpStream, TransportState) {
     let noise = noise.into_transport_mode().unwrap();
     println!("session established...");
 
-    /*
-    // Get to the important business of sending secured data.
-    for _ in 0..10 {
-        let len = noise.write_message(b"HACK THE PLANET", &mut buf).unwrap();
-        send(&mut stream, &buf[..len]);
-    }
-    */
-
     return (stream, noise);
 }
 
-fn run_original_service_end() {
-    let (mut stream, noise) = create_listen_stream();
+fn run_original_service_end(matches: clap::ArgMatches) {
+    let (mut stream, noise) = 
+        if matches.occurrences_of("remote") > 0 {
+            create_connect_stream(&matches)
+        }else{
+            create_listen_stream(&matches)
+        };
 
     let arc_noise = Arc::new(Mutex::new(noise));
 
@@ -327,6 +375,7 @@ fn run_original_service_end() {
     let new_peer_data = Arc::new(Mutex::new(vec![(0u64, vec![0u8;0]);0]));
     let using_peers = Arc::new(Mutex::new(HashMap::new()));//vec![0u64;0]
 
+    let service_addr:String = matches.value_of("service").unwrap().to_string();
     
 
     for thread_index in 0..10 {//ten threads to connect to service
@@ -338,9 +387,13 @@ fn run_original_service_end() {
         let arc_noise = Arc::clone(&arc_noise);
         let mut stream_clone = stream.try_clone().expect("clone failed...");
 
-        let handle = thread::spawn(move ||{
+        let service_addr_clone = service_addr.clone();
+
+        let handle = thread::spawn(move||{// 
+
+            let service_addr_clone2 = service_addr_clone.clone();
             
-            let local_stream = connect_loop("127.0.0.1:7878");
+            let local_stream = connect_loop(&service_addr_clone);
             let local_stream_read = local_stream.try_clone().expect("clone failed...");//for later read
             
             let arc_local_stream = Arc::new(Mutex::new(local_stream));
@@ -351,7 +404,7 @@ fn run_original_service_end() {
             let peer_hash = Arc::new(Mutex::new(0u64));
             let peer_hash_clone = Arc::clone(&peer_hash);
 
-            thread::spawn(move ||{//read thread
+            thread::spawn(move||{//read thread 
                 loop{
 
                     let peer_hash = peer_hash_clone.lock().unwrap();
@@ -409,7 +462,7 @@ fn run_original_service_end() {
 
                         let mut local_stream_clone = arc_local_stream_clone.lock().unwrap();
 
-                        *local_stream_read = connect_loop("127.0.0.1:7878");
+                        *local_stream_read = connect_loop(&service_addr_clone2);
                         *local_stream_clone = local_stream_read.try_clone().expect("clone failed...");
 
                         drop(local_stream_clone);
@@ -518,6 +571,7 @@ fn run_original_service_end() {
             }
 
         });
+        
         handles.push(handle);
 
     }

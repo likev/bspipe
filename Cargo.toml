@@ -1,6 +1,6 @@
 [package]
-name = "snow-hello"
-version = "0.2.0"
+name = "bspipe"
+version = "0.3.0"
 edition = "2021"
 
 [features]
@@ -9,7 +9,7 @@ default-resolver = ["aes-gcm", "chacha20poly1305", "blake2", "sha2", "x25519-dal
 
 [dependencies]
 snow = "0.8"
-clap = "2"
+clap = { version = "3", features = ["cargo"] }
 lazy_static = "1.4"
 
 # default crypto provider
